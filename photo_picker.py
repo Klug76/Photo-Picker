@@ -1,6 +1,6 @@
 """
-photo_picker.py  —  быстрый выбор фото по группам
-Запуск: python photo_picker.py [папка]  или двойной клик на photo_picker.bat
+photo_picker.py  —  fast photo sorter with group assignment
+Usage: python photo_picker.py [folder]  or double-click photo_picker.bat
 """
 
 import json
@@ -13,7 +13,7 @@ from PIL import Image, ImageTk
 import threading
 from pathlib import Path
 
-# ── константы ────────────────────────────────────────────────────────────────
+# ── constants ───────────────────────────────────────────────────────────────
 THUMB_W, THUMB_H = 160, 120
 PREVIEW_MAX = 900
 EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
@@ -23,13 +23,14 @@ GROUP_COLORS_DIM = ['#5a1818', '#165528', '#122d50', '#5a3a08', '#2e1550']
 GROUP_NAMES      = ['group1', 'group2', 'group3', 'group4', 'group5']
 CHECK_SIZE = 18
 CHECK_PAD  = 4
-SEL_BORDER = 3          # толщина рамки выбранной миниатюры
-SEL_COLOR  = '#7ecfff'  # цвет рамки выбора
+SEL_BORDER = 3          # selection frame thickness (px)
+SEL_COLOR  = '#7ecfff'  # selection frame colour
 
 SETTINGS_FILE = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'PhotoPicker' / 'settings.json'
-SORT_OPTIONS  = ['По имени', 'Горизонтальные первыми', 'Вертикальные первыми']
+DATE_OPTIONS   = ['Date ↑ oldest first', 'Date ↓ newest first']
+ORIENT_OPTIONS = ['Mixed', 'Landscape first', 'Portrait first']
 
-# ── вспомогательные ───────────────────────────────────────────────────────────
+# ── helpers ─────────────────────────────────────────────────────────────────
 def load_thumb(path, w=THUMB_W, h=THUMB_H):
     try:
         img = Image.open(path)
@@ -46,7 +47,7 @@ def load_preview(path, maxside=PREVIEW_MAX):
     except Exception:
         return None
 
-# ── ячейка с overlay-галочками ────────────────────────────────────────────────
+# ── thumbnail cell with group-circle overlay ────────────────────────────────
 class ThumbCell(tk.Frame):
     def __init__(self, master, path, thumb, n_groups, on_preview, on_toggle, **kw):
         super().__init__(master, bg='#1a1a2e', **kw)
@@ -59,7 +60,7 @@ class ThumbCell(tk.Frame):
         name = path.name
         name_short = name if len(name) <= 22 else name[:19] + '…'
 
-        # Рамка-бордер: всегда занимает место (SEL_BORDER px), цвет меняется
+        # Border frame: always reserves SEL_BORDER px space; colour changes on focus
         self._border = tk.Frame(self, bg='#1a1a2e',
                                 padx=SEL_BORDER, pady=SEL_BORDER)
         self._border.pack()
@@ -149,7 +150,7 @@ class ThumbCell(tk.Frame):
                 self.canvas.itemconfig(tid, fill='#333')
 
 
-# ── главное окно ──────────────────────────────────────────────────────────────
+# ── main window ────────────────────────────────────────────────────────────
 class PhotoPicker(tk.Tk):
     def __init__(self, folder=None):
         super().__init__()
@@ -160,11 +161,13 @@ class PhotoPicker(tk.Tk):
         self.folder = None
         self.images  = []
         self.thumbs  = {}
-        self.selection = {}          # path → set of group indices
+        self.selection = {}          # path -> set of group indices
         self.group_count = tk.IntVar(value=3)
-        self._settings   = self._load_settings()
-        self.sort_mode   = tk.StringVar(value=self._settings.get('sort_mode', SORT_OPTIONS[0]))
-        self.wheel_nav   = tk.BooleanVar(value=self._settings.get('wheel_nav', False))
+        self._settings    = self._load_settings()
+        self.date_sort    = tk.StringVar(value=self._settings.get('date_sort', DATE_OPTIONS[0]))
+        self.orient_sort  = tk.StringVar(value=self._settings.get('orient_sort', ORIENT_OPTIONS[0]))
+        self.sort_mode    = self.orient_sort  # alias kept for _save_settings compat
+        self.wheel_nav    = tk.BooleanVar(value=self._settings.get('wheel_nav', False))
         self.preview_only = tk.BooleanVar(value=self._settings.get('preview_only', False))
         self.current_preview = None
         self.thumb_cells = {}
@@ -191,17 +194,17 @@ class PhotoPicker(tk.Tk):
         top = tk.Frame(self, bg='#16213e', pady=6)
         top.pack(fill='x', side='top')
 
-        tk.Button(top, text='📂 Открыть папку', command=self._ask_folder,
+        tk.Button(top, text='📂 Open folder', command=self._ask_folder,
                   font=fn_btn, bg='#0f3460', fg='white',
                   relief='flat', padx=12, pady=4).pack(side='left', padx=8)
 
-        self.lbl_folder = tk.Label(top, text='Папка не выбрана',
+        self.lbl_folder = tk.Label(top, text='No folder selected',
                                    font=('Consolas', 10), bg='#16213e', fg='#aaa')
         self.lbl_folder.pack(side='left', padx=8)
 
-        self._legend_items = []  # не используется, оставлено для совместимости
+        self._legend_items = []  # unused; kept for compat
 
-        tk.Label(top, text='Групп:', font=fn_label,
+        tk.Label(top, text='Groups:', font=fn_label,
                  bg='#16213e', fg='#aaa').pack(side='left', padx=(4, 2))
         tk.Spinbox(top, from_=2, to=MAX_GROUPS, textvariable=self.group_count,
                    width=2, font=fn_label,
@@ -211,25 +214,30 @@ class PhotoPicker(tk.Tk):
                   font=fn_btn, bg='#2a3a5e', fg='white',
                   relief='flat', padx=8, pady=4).pack(side='left', padx=(6, 0))
 
-        tk.Label(top, text='Сортировка:', font=fn_label,
+        tk.Label(top, text='Sort:', font=fn_label,
                  bg='#16213e', fg='#aaa').pack(side='left', padx=(12, 2))
-        self._sort_cb = ttk.Combobox(top, textvariable=self.sort_mode,
-                                     values=SORT_OPTIONS, state='readonly',
-                                     width=22, font=fn_label)
-        self._sort_cb.pack(side='left')
-        self._sort_cb.bind('<<ComboboxSelected>>', self._on_sort_changed)
+        self._date_cb = ttk.Combobox(top, textvariable=self.date_sort,
+                                     values=DATE_OPTIONS, state='readonly',
+                                     width=18, font=fn_label)
+        self._date_cb.pack(side='left', padx=(0, 4))
+        self._date_cb.bind('<<ComboboxSelected>>', self._on_sort_changed)
+        self._orient_cb = ttk.Combobox(top, textvariable=self.orient_sort,
+                                       values=ORIENT_OPTIONS, state='readonly',
+                                       width=14, font=fn_label)
+        self._orient_cb.pack(side='left')
+        self._orient_cb.bind('<<ComboboxSelected>>', self._on_sort_changed)
 
-        tk.Button(top, text='💾 Копировать выбранные',
+        tk.Button(top, text='💾 Copy selected',
                   command=self._copy_groups,
                   font=fn_btn, bg='#1a6b4a', fg='white',
                   relief='flat', padx=14, pady=4).pack(side='right', padx=8)
 
-        tk.Button(top, text='✖ Сбросить выбор',
+        tk.Button(top, text='✖ Clear selection',
                   command=self._clear_selection,
                   font=fn_btn, bg='#555', fg='white',
                   relief='flat', padx=10, pady=4).pack(side='right', padx=4)
 
-        # цветные счётчики групп (справа)
+        # coloured per-group counters (right side)
         self._count_frame = tk.Frame(top, bg='#16213e')
         self._count_frame.pack(side='right', padx=10)
         self._count_labels = []
@@ -239,11 +247,11 @@ class PhotoPicker(tk.Tk):
                            fg=GROUP_COLORS[i])
             self._count_labels.append(lbl)
 
-        # ── основная область ──────────────────────────────────────────────────
+        # ── main area ────────────────────────────────────────────────────────
         main = tk.Frame(self, bg='#1a1a2e')
         main.pack(fill='both', expand=True)
 
-        # left panel — width set after window draws (25% wider default = 625)
+        # left panel — initial width; restored from settings after draw
         self.left_panel = tk.Frame(main, bg='#1a1a2e', width=1000)
         self.left_panel.pack(side='left', fill='y')
         self.left_panel.pack_propagate(False)
@@ -253,10 +261,10 @@ class PhotoPicker(tk.Tk):
         self.preview_canvas.pack(fill='both', expand=True, padx=8, pady=8)
         self.preview_canvas.create_text(
             0, 0, tags='hint',
-            text='Нажмите на фото\nдля просмотра',
+            text='Click a photo\nto preview',
             fill='#444', font=('Consolas', 12), anchor='center')
         self.preview_canvas.bind('<Configure>', self._on_preview_canvas_resize)
-        # обратная совместимость — код который читает preview_label
+        # alias so code that references preview_label still works
         self.preview_label = self.preview_canvas
 
         self.lbl_fname = tk.Label(self.left_panel, text='',
@@ -264,7 +272,7 @@ class PhotoPicker(tk.Tk):
                                   wraplength=480)
         self.lbl_fname.pack(pady=(0, 4))
 
-        # ── splitter ──────────────────────────────────────────────────────────
+        # ── splitter ─────────────────────────────────────────────────────────
         self._splitter = tk.Frame(main, bg='#2a3a5e', width=6, cursor='sb_h_double_arrow')
         self._splitter.pack(side='left', fill='y')
         self._splitter.pack_propagate(False)
@@ -273,10 +281,10 @@ class PhotoPicker(tk.Tk):
         self._splitter.bind('<ButtonRelease-1>',  self._split_end)
         self._splitter.bind('<Enter>', lambda e: self._splitter.config(bg='#4a6aae'))
         self._splitter.bind('<Leave>', lambda e: self._splitter.config(bg='#2a3a5e'))
-        self._split_x = None        # mouse x at drag start
-        self._split_w = None        # panel width at drag start
+        self._split_x = None  # mouse x at drag start
+        self._split_w = None  # panel width at drag start
 
-        # resize preview when left panel size changes
+        # refresh preview when left panel is resized
         self.left_panel.bind('<Configure>', self._on_panel_resize)
 
         self._resize_after_id = None
@@ -299,14 +307,14 @@ class PhotoPicker(tk.Tk):
             scrollregion=self.canvas.bbox('all')))
         self.canvas.bind('<Configure>', self._on_grid_canvas_resize)
         # do NOT force canvas_window width — let grid_frame size itself naturally
-        # bind_all so wheel works even when child widgets have focus
+        # bind_all so mouse wheel works even when a child widget has focus
         self.bind_all('<MouseWheel>', self._on_mousewheel)
         self.bind_all('<Button-4>',   self._on_mousewheel)
         self.bind_all('<Button-5>',   self._on_mousewheel)
 
         self._update_legend()
 
-    # ── splitter drag ─────────────────────────────────────────────────────────
+    # ── splitter drag ────────────────────────────────────────────────────────
     def _split_start(self, e):
         self._split_x = e.x_root
         self._split_w = self.left_panel.winfo_width()
@@ -346,7 +354,7 @@ class PhotoPicker(tk.Tk):
         if self.current_preview:
             self._show_preview(self.current_preview)
 
-    # ── panel resize → debounced preview refresh ───────────────────────────────
+    # ── panel resize -> debounced preview refresh ────────────────────────────
     def _on_panel_resize(self, e):
         if self._resize_after_id:
             self.after_cancel(self._resize_after_id)
@@ -370,7 +378,7 @@ class PhotoPicker(tk.Tk):
 
     def _update_legend(self):
         n = self.group_count.get()
-        # перепаковываем счётчики: только активные группы, справа налево
+        # repack counters: active groups only, right-to-left so group 0 is rightmost
         for lbl in self._count_labels:
             lbl.pack_forget()
         for i in range(n - 1, -1, -1):
@@ -379,7 +387,7 @@ class PhotoPicker(tk.Tk):
     def _on_group_count_changed(self):
         self._update_legend()
         n = self.group_count.get()
-        # чистим выборы за пределами новых групп
+        # drop selections that fall outside the new group count
         for path in list(self.selection):
             self.selection[path] = {g for g in self.selection[path] if g < n}
             if not self.selection[path]:
@@ -389,19 +397,16 @@ class PhotoPicker(tk.Tk):
             cell.set_groups(self.selection.get(path, set()))
         self._update_count_label()
 
-    # ── папка ─────────────────────────────────────────────────────────────────
+    # ── folder ───────────────────────────────────────────────────────────────
     def _ask_folder(self):
-        d = filedialog.askdirectory(title='Выберите папку с фотографиями')
+        d = filedialog.askdirectory(title='Select photo folder')
         if d:
             self._open_folder(d)
 
     def _open_folder(self, folder):
         self.folder = Path(folder)
-        raw = sorted(
-            [p for p in self.folder.iterdir()
-             if p.suffix.lower() in EXTS and p.is_file()],
-            key=lambda p: p.name.lower()
-        )
+        raw = [p for p in self.folder.iterdir()
+               if p.suffix.lower() in EXTS and p.is_file()]
         self.images = self._sort_images(raw)
         self.thumbs.clear()
         self.selection.clear()
@@ -412,10 +417,10 @@ class PhotoPicker(tk.Tk):
             self._focused_idx = 0
             self.after(50, lambda: self._show_preview(self.images[0]))
 
-    # ── диалог настроек ───────────────────────────────────────────────────────
+    # ── settings dialog ──────────────────────────────────────────────────────
     def _open_settings(self):
         dlg = tk.Toplevel(self)
-        dlg.title('Настройки')
+        dlg.title('Settings')
         dlg.configure(bg='#1a1a2e')
         dlg.resizable(False, False)
         dlg.grab_set()
@@ -423,19 +428,19 @@ class PhotoPicker(tk.Tk):
         fn = ('Consolas', 10)
         pad = dict(padx=16, pady=6)
 
-        # временные переменные — применяем только по OK
+        # local vars — applied only on OK
         v_wheel   = tk.BooleanVar(value=self.wheel_nav.get())
         v_preview = tk.BooleanVar(value=self.preview_only.get())
 
-        tk.Label(dlg, text='Поведение колеса мыши',
+        tk.Label(dlg, text='Mouse wheel behaviour',
                  font=('Consolas', 10, 'bold'), bg='#1a1a2e', fg='#7ecfff'
                  ).grid(row=0, column=0, columnspan=2, sticky='w', padx=16, pady=(14, 2))
-        tk.Radiobutton(dlg, text='Прокрутка списка миниатюр',
+        tk.Radiobutton(dlg, text='Scroll thumbnail grid',
                        variable=v_wheel, value=False,
                        font=fn, bg='#1a1a2e', fg='#ccc',
                        selectcolor='#0f3460', activebackground='#1a1a2e'
                        ).grid(row=1, column=0, columnspan=2, sticky='w', **pad)
-        tk.Radiobutton(dlg, text='Переключение выбранного фото (навигация)',
+        tk.Radiobutton(dlg, text='Navigate photos (prev / next)',
                        variable=v_wheel, value=True,
                        font=fn, bg='#1a1a2e', fg='#ccc',
                        selectcolor='#0f3460', activebackground='#1a1a2e'
@@ -444,10 +449,10 @@ class PhotoPicker(tk.Tk):
         ttk.Separator(dlg, orient='horizontal').grid(
             row=3, column=0, columnspan=2, sticky='ew', padx=16, pady=6)
 
-        tk.Label(dlg, text='Вид',
+        tk.Label(dlg, text='View',
                  font=('Consolas', 10, 'bold'), bg='#1a1a2e', fg='#7ecfff'
                  ).grid(row=4, column=0, columnspan=2, sticky='w', padx=16, pady=(2, 2))
-        tk.Checkbutton(dlg, text='Только превью (скрыть список миниатюр)',
+        tk.Checkbutton(dlg, text='Preview only (hide thumbnail grid)',
                        variable=v_preview,
                        font=fn, bg='#1a1a2e', fg='#ccc',
                        selectcolor='#0f3460', activebackground='#1a1a2e'
@@ -473,7 +478,7 @@ class PhotoPicker(tk.Tk):
         tk.Button(btn_frame, text='OK', command=on_ok,
                   font=('Consolas', 10, 'bold'), bg='#1a6b4a', fg='white',
                   relief='flat', padx=20, pady=4).pack(side='left', padx=8)
-        tk.Button(btn_frame, text='Отмена', command=dlg.destroy,
+        tk.Button(btn_frame, text='Cancel', command=dlg.destroy,
                   font=('Consolas', 10, 'bold'), bg='#555', fg='white',
                   relief='flat', padx=12, pady=4).pack(side='left', padx=8)
 
@@ -494,7 +499,7 @@ class PhotoPicker(tk.Tk):
         if self.current_preview:
             self.after(80, lambda: self._show_preview(self.current_preview))
 
-    # ── настройки / сортировка ────────────────────────────────────────────────
+    # ── settings / sort ──────────────────────────────────────────────────────
     def _load_settings(self):
         try:
             if SETTINGS_FILE.exists():
@@ -504,9 +509,10 @@ class PhotoPicker(tk.Tk):
         return {}
 
     def _save_settings(self, **extra):
-        """Записывает настройки, мержа extra-ключи поверх существующих."""
+        """Persist settings, merging extra keys on top of existing ones."""
         data = self._load_settings()
-        data['sort_mode'] = self.sort_mode.get()
+        data['date_sort']   = self.date_sort.get()
+        data['orient_sort'] = self.orient_sort.get()
         data.update(extra)
         try:
             SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -523,23 +529,25 @@ class PhotoPicker(tk.Tk):
             return 'h'
 
     def _sort_images(self, images):
-        mode = self.sort_mode.get()
-        if mode == SORT_OPTIONS[0]:
+        # Step 1: date sort
+        date_mode = self.date_sort.get()
+        reverse_date = (date_mode == DATE_OPTIONS[1])
+        images = sorted(images, key=lambda p: p.stat().st_mtime, reverse=reverse_date)
+        # Step 2: orientation split (stable sort preserves date order within each bucket)
+        orient_mode = self.orient_sort.get()
+        if orient_mode == ORIENT_OPTIONS[0]:  # Mixed — no orientation split
             return images
         orientations = {p: self._get_orientation(p) for p in images}
-        if mode == SORT_OPTIONS[1]:   # горизонтальные первыми
-            return sorted(images, key=lambda p: (0 if orientations[p] == 'h' else 1, p.name.lower()))
-        else:                          # вертикальные первыми
-            return sorted(images, key=lambda p: (0 if orientations[p] == 'v' else 1, p.name.lower()))
+        if orient_mode == ORIENT_OPTIONS[1]:  # Landscape first
+            return sorted(images, key=lambda p: (0 if orientations[p] == 'h' else 1))
+        else:                                  # Portrait first
+            return sorted(images, key=lambda p: (0 if orientations[p] == 'v' else 1))
 
     def _on_sort_changed(self, event=None):
         self._save_settings()
         if self.folder:
-            raw = sorted(
-                [p for p in self.folder.iterdir()
-                 if p.suffix.lower() in EXTS and p.is_file()],
-                key=lambda p: p.name.lower()
-            )
+            raw = [p for p in self.folder.iterdir()
+                   if p.suffix.lower() in EXTS and p.is_file()]
             self.images = self._sort_images(raw)
             self.thumbs.clear()
             self._refresh_grid()
@@ -547,7 +555,7 @@ class PhotoPicker(tk.Tk):
                 self._focused_idx = 0
                 self.after(50, lambda: self._show_preview(self.images[0]))
 
-    # ── сетка ─────────────────────────────────────────────────────────────────
+    # ── thumbnail grid ───────────────────────────────────────────────────────
     def _refresh_grid(self):
         for w in self.grid_frame.winfo_children():
             w.destroy()
@@ -566,7 +574,7 @@ class PhotoPicker(tk.Tk):
         w = self.canvas.winfo_width()
         if w < 10:
             w = self.winfo_width() - self.left_panel.winfo_width() - 20
-        # cell width = thumb + 2*padx (3+3=6) + cell border (2) = THUMB_W + 8
+        # cell width = thumb + 2*padx (3+3=6) + border (2) = THUMB_W + 8
         cols = max(1, w // (THUMB_W + 8))
         return cols
 
@@ -611,7 +619,7 @@ class PhotoPicker(tk.Tk):
         self._update_count_label()
         self._draw_preview_circles()
 
-    # ── превью ────────────────────────────────────────────────────────────────
+    # ── preview ──────────────────────────────────────────────────────────────
     def _show_preview(self, path):
         self.current_preview = path
         self.lbl_fname.config(text=path.name)
@@ -697,17 +705,17 @@ class PhotoPicker(tk.Tk):
     def _set_preview(self, img):
         c = self.preview_canvas
         c.delete('all')
-        c._img = img   # держим ссылку
+        c._img = img   # keep a reference so GC doesn't collect it
         cw = c.winfo_width()  or 1
         ch = c.winfo_height() or 1
         c.create_image(cw // 2, ch // 2, anchor='center', image=img, tags='photo')
         self._draw_preview_circles()
 
-    # ── кружочки групп на превью ──────────────────────────────────────────────
+    # ── group circles on large preview ───────────────────────────────────────
     def _on_preview_canvas_resize(self, e):
-        # перецентрировать подсказку
+        # re-centre the hint text
         self.preview_canvas.coords('hint', e.width // 2, e.height // 2)
-        # перерисовать фото и кружочки если есть
+        # redraw photo and circles if a preview is active
         if self.current_preview:
             self._show_preview(self.current_preview)
 
@@ -744,24 +752,24 @@ class PhotoPicker(tk.Tk):
                 self._on_toggle(self.current_preview, gi)
                 return
 
-    # ── счётчик ───────────────────────────────────────────────────────────────
+    # ── group counters ───────────────────────────────────────────────────────
     def _update_count_label(self):
         n = self.group_count.get()
         for i in range(MAX_GROUPS):
             c = sum(1 for s in self.selection.values() if i in s)
             self._count_labels[i].config(text=f'{GROUP_NAMES[i]}: {c}')
 
-    # ── сбросить ──────────────────────────────────────────────────────────────
+    # ── clear selection ─────────────────────────────────────────────────────
     def _clear_selection(self):
         self.selection.clear()
         for cell in self.thumb_cells.values():
             cell.set_groups(set())
         self._update_count_label()
 
-    # ── копировать ────────────────────────────────────────────────────────────
+    # ── copy to groups ───────────────────────────────────────────────────────
     def _copy_groups(self):
         if not self.selection:
-            messagebox.showinfo('Внимание', 'Ни одно фото не выбрано.')
+            messagebox.showinfo('Notice', 'No photos selected.')
             return
         n = self.group_count.get()
         copied  = {i: 0 for i in range(n)}
@@ -781,22 +789,22 @@ class PhotoPicker(tk.Tk):
                     shutil.copy2(path, dest)
                     copied[g] += 1
                 except Exception as ex:
-                    errors.append(f'{path.name} → {GROUP_NAMES[g]}: {ex}')
+                    errors.append(f'{path.name} -> {GROUP_NAMES[g]}: {ex}')
 
         lines = []
         for i in range(n):
             parts = []
-            if copied[i]:  parts.append(f'скопировано {copied[i]}')
-            if skipped[i]: parts.append(f'уже есть {skipped[i]}')
+            if copied[i]:  parts.append(f'copied {copied[i]}')
+            if skipped[i]: parts.append(f'already exists {skipped[i]}')
             if parts:
                 lines.append(f'{GROUP_NAMES[i]}: ' + ', '.join(parts))
         summary = '\n'.join(lines)
         if errors:
-            summary += '\n\nОшибки:\n' + '\n'.join(errors)
-        messagebox.showinfo('Готово', summary or 'Ничего не скопировано.')
+            summary += '\n\nErrors:\n' + '\n'.join(errors)
+        messagebox.showinfo('Done', summary or 'Nothing was copied.')
 
 
-# ── запуск ────────────────────────────────────────────────────────────────────
+# ── entry point ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     folder = sys.argv[1] if len(sys.argv) > 1 else None
     app = PhotoPicker(folder)

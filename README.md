@@ -11,8 +11,8 @@ A fast, keyboard-friendly photo sorter for Windows. Browse a folder, assign phot
 - **Group assignment** — up to 5 colour-coded groups per photo
 - **Keyboard navigation** — `←` `→` arrows, `Space` / `1`–`5` to toggle groups
 - **Mouse wheel** — scrolls the grid or navigates photos (configurable)
-- **Sort order** — by name, horizontals first, or verticals first
-- **Preview-only mode** — hide the grid, work from the big image alone; group circles appear in the corner
+- **Two-axis sort** — date order (oldest/newest) combined with orientation split (mixed / landscape first / portrait first)
+- **Preview-only mode** — hide the grid, work from the big image alone; group circles appear in the corner and are clickable
 - **Settings dialog** — all options in one place, persisted between sessions
 - **Safe copy** — files already present in a destination folder are skipped, never overwritten
 
@@ -42,13 +42,7 @@ python photo_picker.py C:\Photos\Vacation
 
 ### Windows: double-click launcher
 
-Create `photo_picker.bat` next to the script:
-
-```bat
-@echo off
-python "%~dp0photo_picker.py" %*
-pause
-```
+`photo_picker.bat` is included — just double-click it. If Python or Pillow is missing it prints an error and pauses.
 
 ## Usage
 
@@ -67,24 +61,26 @@ pause
 | `Space` | Toggle group 1 |
 | `1` – `5` | Toggle group 1–5 |
 
+### Sort controls (top bar)
+
+Two dropdowns next to the **Sort:** label work together:
+
+| Dropdown | Options | Effect |
+|----------|---------|--------|
+| Date | Date ↑ oldest first | Oldest files first |
+| | Date ↓ newest first | Newest files first |
+| Orientation | Mixed | No orientation split; date order preserved |
+| | Landscape first | Landscape photos before portrait (date order within each group) |
+| | Portrait first | Portrait photos before landscape |
+
 ### Settings (⚙ button)
 
 | Option | Description |
 |--------|-------------|
 | Mouse wheel | Scroll the thumbnail grid **or** navigate photos |
-| Preview-only mode | Hide the thumbnail grid; group circles appear on the preview |
+| Preview only | Hide the thumbnail grid; group circles appear on the preview |
 
-Settings are saved to `%LOCALAPPDATA%\PhotoPicker\settings.json` and restored on next launch. The file is plain JSON — you can edit it by hand.
-
-### Sort order
-
-The **Sort** dropdown (top bar) controls the order photos appear in the grid:
-
-| Option | Order |
-|--------|-------|
-| По имени | Alphabetical (default) |
-| Горизонтальные первыми | Landscape photos first, then portrait |
-| Вертикальные первыми | Portrait photos first, then landscape |
+Settings are saved to `%LOCALAPPDATA%\PhotoPicker\settings.json` and restored on next launch.
 
 ## Supported formats
 
@@ -96,7 +92,8 @@ The **Sort** dropdown (top bar) controls the order photos appear in the grid:
 
 ```json
 {
-  "sort_mode": "По имени",
+  "date_sort": "Date ↑ oldest first",
+  "orient_sort": "Mixed",
   "splitter_ratio": 0.42,
   "wheel_nav": false,
   "preview_only": false
