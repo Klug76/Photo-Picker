@@ -28,6 +28,7 @@ SEL_COLOR  = '#7ecfff'  # selection frame colour
 
 SETTINGS_FILE = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'PhotoPicker' / 'settings.json'
 DATE_OPTIONS   = ['Date ↑ oldest first', 'Date ↓ newest first']
+
 ORIENT_OPTIONS = ['Mixed', 'Landscape first', 'Portrait first']
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -488,16 +489,36 @@ class PhotoPicker(tk.Tk):
         dlg.geometry(f'+{x}+{y}')
 
     def _apply_preview_only(self):
-        if self.preview_only.get():
+        mode = self.preview_only.get()
+        if mode:
             self._splitter.pack_forget()
             self._right.pack_forget()
-            self.left_panel.config(width=self.winfo_width())
+            def _set_width():
+                w = max(self.winfo_width(), 200)
+                self.left_panel.config(width=w)
+            self.after(20, _set_width)
         else:
+            # Cancel any pending panel-resize callbacks that might interfere
+            if self._resize_after_id:
+                self.after_cancel(self._resize_after_id)
+                self._resize_after_id = None
+            # Re-pack right panel and splitter first, then let layout settle
+            # before reading winfo_width() — fixes the case where the user
+            # never dragged the splitter (no splitter_ratio saved) and the
+            # geometry manager hadn't yet reported real window dimensions.
+            self._splitter.pack_forget()
+            self._right.pack_forget()
             self._splitter.pack(side='left', fill='y')
             self._right.pack(side='left', fill='both', expand=True)
+            self.update_idletasks()
+            ratio = self._settings.get('splitter_ratio', 0.5)
+            total = self.winfo_width()
+            if total > 10:
+                safe_w = max(200, int(total * ratio))
+                self.left_panel.config(width=safe_w)
             self.after(50, self._restore_splitter)
         if self.current_preview:
-            self.after(80, lambda: self._show_preview(self.current_preview))
+            self.after(100, lambda: self._show_preview(self.current_preview))
 
     # ── settings / sort ──────────────────────────────────────────────────────
     def _load_settings(self):
