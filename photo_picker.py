@@ -12,6 +12,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from PIL import Image, ImageTk
 import threading
+import queue
+import time
 from pathlib import Path
 
 # ── constants ───────────────────────────────────────────────────────────────
@@ -53,6 +55,7 @@ class ThumbCell(tk.Frame):
         self.on_toggle = on_toggle
         self._is_focused = False
         self._selected = False
+        self._thumb_image = None
 
         name = path.name
         name_short = name if len(name) <= 22 else name[:19] + '…'
@@ -67,9 +70,6 @@ class ThumbCell(tk.Frame):
                                  font=('Consolas', 7), bg='#1a1a2e', fg='#666',
                                  cursor='hand2')
         self.name_lbl.pack()
-
-        if thumb:
-            self.canvas.create_image(THUMB_W // 2, THUMB_H // 2, anchor='center', image=thumb)
 
         r = CHECK_SIZE // 2
         self._cx = THUMB_W - CHECK_PAD - r
@@ -102,13 +102,24 @@ class ThumbCell(tk.Frame):
             return
         self.on_preview(self.path)
 
+    def set_thumb(self, thumb):
+        """Set thumbnail after cell creation"""
+        self._thumb_image = thumb
+        self.canvas.delete('thumb')
+        if thumb:
+            self.canvas.create_image(THUMB_W // 2, THUMB_H // 2, anchor='center', image=thumb, tag='thumb')
+            # Bring check mark above thumbnail z-index
+            self.canvas.tag_raise(self._circle_id)
+            self.canvas.tag_raise(self._check_id)
+
     def _redraw(self):
         if self._selected:
             fill, outline, width, tick = SELECT_COLOR, 'white', 2, 'white'
+            self.canvas.itemconfig(self._circle_id, state='normal', fill=fill, outline=outline, width=width)
+            self.canvas.itemconfig(self._check_id, state='normal', fill=tick)
         else:
-            fill, outline, width, tick = DIM_COLOR, '#000', 1, '#333'
-        self.canvas.itemconfig(self._circle_id, fill=fill, outline=outline, width=width)
-        self.canvas.itemconfig(self._check_id, fill=tick)
+            self.canvas.itemconfig(self._circle_id, state='hidden')
+            self.canvas.itemconfig(self._check_id, state='hidden')
 
 
 class PhotoPicker(tk.Tk):
@@ -133,13 +144,30 @@ class PhotoPicker(tk.Tk):
         self.group_name_var = tk.StringVar()
 
         self.current_preview = None
+
+        self._preview_zoom_active = False
+        self._preview_zoom_img = None
+        self._preview_zoom_photo = None
+        self._zoom_offset_x = 0
+        self._zoom_offset_y = 0
+        self._last_mouse_x = 0
+        self._last_mouse_y = 0
+        self.zoom_factor = int(self._settings.get('zoom_factor', 200))  # percent, e.g. 200 = 2x
+
         self.thumb_cells = {}
         self._focused_idx = 0
         self._resize_after_id = None
         self._split_x = None
         self._split_w = None
 
+        # Smart thumbnail loader
+        self._thumb_queue = queue.PriorityQueue()
+        self._thumb_workers = []
+        self._thumb_stop = False
+        self._scroll_after_id = None
+
         self._build_ui()
+        self.bind('<FocusOut>', lambda e: self._end_zoom())
         self.after(200, self._restore_splitter)
         self.after(210, self._apply_preview_only)
 
@@ -187,6 +215,16 @@ class PhotoPicker(tk.Tk):
         self.selected_label = tk.Label(top, text='Selected: 0',
                                        font=('Consolas', 10, 'bold'), bg='#16213e', fg='#7ecfff')
         self.selected_label.pack(side='left', padx=(10, 20))
+
+        # iOS-style spinner
+        self._spinner_frame = tk.Frame(top, bg='#16213e')
+        self._spinner_canvas = tk.Canvas(self._spinner_frame, width=40, height=40,
+                                         bg='#16213e', highlightthickness=0)
+        self._spinner_canvas.pack()
+        self._spinner_angle = 0
+        self._spinner_after_id = None
+        self._loading_total = 0
+        self._loading_done = 0
 
         # Fixed width buttons — prevents jumping when text length changes
         self.copy_btn = tk.Button(top, text='💾 Copy selected\nto "group1"', command=self._apply_groups,
@@ -241,6 +279,11 @@ class PhotoPicker(tk.Tk):
 
         self.grid_frame.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         self.canvas.bind('<Configure>', self._on_grid_canvas_resize)
+
+        self.canvas.bind('<MouseWheel>', self._on_grid_scroll)
+        self.canvas.bind('<Button-4>', self._on_grid_scroll)
+        self.canvas.bind('<Button-5>', self._on_grid_scroll)
+        self.canvas.bind('<B1-Motion>', self._on_grid_scroll)
 
         self.bind_all('<MouseWheel>', self._on_mousewheel)
         self.bind_all('<Button-4>', self._on_mousewheel)
@@ -418,11 +461,12 @@ class PhotoPicker(tk.Tk):
 
         if self.current_group:
             self._load_group_selection(self.current_group)
-            self.after(50, self._scroll_to_first_selected)   # ← new
+            self._update_all_cells()
+            self.after(100, self._scroll_to_first_selected)
         else:
             self.current_selection.clear()
+            self._update_all_cells()
 
-        self._update_all_cells()
         self._update_ui_state()
 
     def _load_group_selection(self, group_name: str):
@@ -568,17 +612,119 @@ class PhotoPicker(tk.Tk):
                 self.after(50, lambda: self._show_preview(self.images[0]))
 
     def _refresh_grid(self):
+        # Stop existing worker threads
+        self._thumb_stop = True
+        while not self._thumb_queue.empty():
+            try: self._thumb_queue.get(block=False)
+            except: pass
+
         for w in self.grid_frame.winfo_children():
             w.destroy()
         self.thumb_cells = {}
-        threading.Thread(target=self._load_thumbs_bg, daemon=True).start()
 
-    def _load_thumbs_bg(self):
+        # Create ALL cells first, before thumbnails load
+        cols = self._get_cols()
         for idx, path in enumerate(self.images):
-            if path not in self.thumbs:
+            th = self.thumbs.get(path)
+            cell = ThumbCell(self.grid_frame, path, th, self._show_preview, self._on_toggle)
+            row, col = divmod(idx, cols)
+            cell.grid(row=row, column=col, padx=3, pady=3)
+            self.thumb_cells[path] = cell
+            cell.set_selected(path in self.current_selection)
+
+        # Grid is fully ready, scroll works immediately!
+        self._thumb_stop = False
+
+        # Start 3 worker threads for loading
+        for _ in range(3):
+            t = threading.Thread(target=self._thumb_worker, daemon=True)
+            t.start()
+            self._thumb_workers.append(t)
+
+        if self.images:
+            self.after(10, self._spinner_show)
+            self.after(50, self._schedule_thumb_load)
+
+    def _on_grid_scroll(self, e=None):
+        """Handler for any scroll position changes"""
+        if self._scroll_after_id:
+            self.after_cancel(self._scroll_after_id)
+        # Wait until user stops scrolling for 120ms
+        self._scroll_after_id = self.after(120, self._schedule_thumb_load)
+
+    def _schedule_thumb_load(self):
+        """Redistribute loading priorities based on visible area"""
+        if not self.images:
+            return
+
+        total_h = self.grid_frame.winfo_height() or 1
+        view_top, view_bot = self.canvas.yview()
+        canvas_h = self.canvas.winfo_height()
+        cell_h = THUMB_H + 6
+        cols = self._get_cols()
+
+        first_visible_idx = int(view_top * total_h / cell_h) * cols
+        last_visible_idx = int(view_bot * total_h / cell_h) * cols
+
+        # Clear old queue
+        while not self._thumb_queue.empty():
+            try: self._thumb_queue.get(block=False)
+            except: pass
+
+        # Add tasks with priority
+        for idx, path in enumerate(self.images):
+            if path in self.thumbs:
+                continue
+
+            # Calculate priority (lower = higher priority)
+            dist = abs(idx - (first_visible_idx + last_visible_idx)//2)
+            # Currently visible - highest priority
+            if first_visible_idx - cols*2 <= idx <= last_visible_idx + cols*2:
+                priority = 0
+            # Near visible area
+            elif first_visible_idx - cols*10 <= idx <= last_visible_idx + cols*10:
+                priority = 1000
+            # Further down the list
+            else:
+                priority = 10000 + dist
+
+            self._thumb_queue.put( (priority, idx, path) )
+
+        # Check if loading is complete every second
+        self.after(1000, self._check_loading_complete)
+
+    def _thumb_worker(self):
+        """Worker thread for loading thumbnails"""
+        while not self._thumb_stop:
+            try:
+                priority, idx, path = self._thumb_queue.get(timeout=0.2)
+                if self._thumb_stop:
+                    break
+
+                if path in self.thumbs:
+                    self._thumb_queue.task_done()
+                    continue
+
                 th = load_thumb(path)
-                if th: self.thumbs[path] = th
-            self.after(0, self._place_thumb, path, idx)
+                if th:
+                    self.thumbs[path] = th
+                    self.after(0, self._update_thumb, path, th)
+
+                self._thumb_queue.task_done()
+
+            except queue.Empty:
+                continue
+
+        # When all threads finish - hide spinner
+        self.after(0, self._check_loading_complete)
+
+    def _check_loading_complete(self):
+        """Check if all thumbnails have finished loading"""
+        if not self._thumb_stop and all(p in self.thumbs for p in self.images):
+            self._spinner_hide()
+        elif not self._thumb_stop:
+            # Keep checking until everything is loaded
+            self.after(1000, self._check_loading_complete)
 
     def _get_cols(self):
         w = self.canvas.winfo_width() or (self.winfo_width() - self.left_panel.winfo_width() - 20)
@@ -597,14 +743,41 @@ class PhotoPicker(tk.Tk):
                 row, col = divmod(idx, cols)
                 cell.grid(row=row, column=col, padx=3, pady=3)
 
-    def _place_thumb(self, path, idx):
-        cols = self._get_cols()
-        row, col = divmod(idx, cols)
-        th = self.thumbs.get(path)
-        cell = ThumbCell(self.grid_frame, path, th, self._show_preview, self._on_toggle)
-        cell.grid(row=row, column=col, padx=3, pady=3)
-        self.thumb_cells[path] = cell
-        cell.set_selected(path in self.current_selection)
+    def _update_thumb(self, path, thumb):
+        """Update thumbnail in already created cell"""
+        cell = self.thumb_cells.get(path)
+        if cell:
+            cell.set_thumb(thumb)
+
+    def _spinner_show(self):
+        if self._spinner_after_id:
+            return
+        self._spinner_frame.pack(side='right', padx=4)
+        self._spinner_tick()
+
+    def _spinner_hide(self):
+        if self._spinner_after_id:
+            self.after_cancel(self._spinner_after_id)
+            self._spinner_after_id = None
+        self._spinner_frame.pack_forget()
+
+    def _spinner_tick(self):
+        import math
+        c = self._spinner_canvas
+        c.delete('all')
+        cx, cy, r_out, r_in = 20, 20, 16, 8
+        n = 12
+        for i in range(n):
+            angle = math.radians((self._spinner_angle + i * 30) % 360)
+            val = int(40 + (i + 1) / n * 185)
+            color = f'#{val:02x}{val:02x}{val:02x}'
+            x1 = cx + r_in * math.cos(angle)
+            y1 = cy + r_in * math.sin(angle)
+            x2 = cx + r_out * math.cos(angle)
+            y2 = cy + r_out * math.sin(angle)
+            c.create_line(x1, y1, x2, y2, fill=color, width=2.5, capstyle='round')
+        self._spinner_angle = (self._spinner_angle - 30) % 360
+        self._spinner_after_id = self.after(80, self._spinner_tick)
 
     def _show_preview(self, path):
         self.current_preview = path
@@ -658,7 +831,6 @@ class PhotoPicker(tk.Tk):
         if not self.current_selection:
             return
 
-        # Find first selected item in current images order
         first_selected = None
         for path in self.images:
             if path in self.current_selection:
@@ -672,7 +844,8 @@ class PhotoPicker(tk.Tk):
         if not cell:
             return
 
-        self.canvas.update_idletasks()
+        self.canvas.config(scrollregion=self.canvas.bbox('all'))
+        self.update_idletasks()
 
         cy = cell.winfo_y()
         ch = cell.winfo_height()
@@ -681,24 +854,26 @@ class PhotoPicker(tk.Tk):
         if total_h <= 0:
             return
 
-        # Scroll so top of selected item is slightly above viewport center
         target = max(0, cy - ch * 2) / total_h
         self.canvas.yview_moveto(target)
 
     def _load_preview_bg(self, path):
-        pw = max(self.left_panel.winfo_width() - 16, 100)
-        ph = max(self.preview_canvas.winfo_height() - 16, 100)
         try:
             with Image.open(path) as src:
-                iw, ih = src.size
-                scale = min(min(pw / iw, ph / ih), 1.0)
-                nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
-                resized = src.resize((nw, nh), Image.LANCZOS)
+                self._preview_zoom_img = src.copy()          # оригинал для зума
+                # обычное превью
+                pw = max(self.left_panel.winfo_width() - 32, 200)
+                ph = max(self.preview_canvas.winfo_height() - 32, 200)
+                scale = min(pw / src.width, ph / src.height, 1.0)
+                resized = src.resize((int(src.width*scale), int(src.height*scale)), Image.LANCZOS)
                 img = ImageTk.PhotoImage(resized)
         except Exception:
             img = None
-        if img and path == self.current_preview:
-            self.after(0, self._set_preview, img)
+            self._preview_zoom_img = None
+
+        if path == self.current_preview:
+            self.after(0, lambda: self._set_preview(img))
+
 
     def _set_preview(self, img):
         c = self.preview_canvas
@@ -707,7 +882,97 @@ class PhotoPicker(tk.Tk):
         cw = c.winfo_width() or 1
         ch = c.winfo_height() or 1
         c.create_image(cw//2, ch//2, anchor='center', image=img, tags='photo')
+
         self._draw_preview_circles()
+
+        c.bind('<ButtonPress-3>', self._start_zoom)
+        c.bind('<ButtonRelease-3>', self._end_zoom)
+        c.bind('<B3-Motion>', self._on_zoom_motion)
+
+
+    def _cursor_to_orig(self, mouse_x, mouse_y):
+        """Convert canvas mouse coordinates to original image pixel coordinates."""
+        c = self.preview_canvas
+        cw = c.winfo_width()
+        ch = c.winfo_height()
+        ow, oh = self._preview_zoom_img.size
+        scale_fit = min(cw / ow, ch / oh, 1.0)
+        img_display_w = ow * scale_fit
+        img_display_h = oh * scale_fit
+        offset_x = (cw - img_display_w) / 2
+        offset_y = (ch - img_display_h) / 2
+        x_orig = (mouse_x - offset_x) / scale_fit
+        y_orig = (mouse_y - offset_y) / scale_fit
+        return x_orig, y_orig
+
+    def _start_zoom(self, event):
+        if not self._preview_zoom_img:
+            return
+        self._preview_zoom_active = True
+        self._apply_zoom(event.x, event.y)
+
+
+    def _apply_zoom(self, mouse_x=None, mouse_y=None):
+        """Render zoomed view centered on the current cursor position in the original image."""
+        if not self._preview_zoom_img or not self._preview_zoom_active:
+            return
+
+        c = self.preview_canvas
+        cw = c.winfo_width()
+        ch = c.winfo_height()
+        ow, oh = self._preview_zoom_img.size
+
+        # Use last known mouse position if not provided
+        if mouse_x is None:
+            mouse_x = self._last_mouse_x
+        if mouse_y is None:
+            mouse_y = self._last_mouse_y
+
+        self._last_mouse_x = mouse_x
+        self._last_mouse_y = mouse_y
+
+        # Factor: e.g. 200% means 1 canvas pixel = 1/2 original pixel
+        factor = self.zoom_factor / 100.0  # e.g. 2.0
+        # Crop size in original pixels that fills the canvas at this zoom level
+        crop_w = cw / factor
+        crop_h = ch / factor
+
+        # Map cursor to original image coordinates
+        x_orig, y_orig = self._cursor_to_orig(mouse_x, mouse_y)
+
+        # Top-left of the crop so cursor point is at canvas center
+        left = x_orig - crop_w / 2
+        top  = y_orig - crop_h / 2
+
+        # Clamp so we never go outside the image
+        left = max(0.0, min(left, ow - crop_w))
+        top  = max(0.0, min(top,  oh - crop_h))
+        right  = left + crop_w
+        bottom = top  + crop_h
+
+        try:
+            cropped = self._preview_zoom_img.crop((int(left), int(top), int(right), int(bottom)))
+            zoomed = cropped.resize((cw, ch), Image.NEAREST)
+
+            self._preview_zoom_photo = ImageTk.PhotoImage(zoomed)
+            c.delete('photo')
+            c.create_image(cw // 2, ch // 2, anchor='center', image=self._preview_zoom_photo, tags='photo')
+
+        except Exception as e:
+            print(f"[ZOOM ERROR] {e}")
+
+    def _end_zoom(self, event=None):
+        self._preview_zoom_active = False
+        if self.current_preview:
+            threading.Thread(target=self._load_preview_bg,
+                             args=(self.current_preview,), daemon=True).start()
+
+
+    def _on_zoom_motion(self, event):
+        if not self._preview_zoom_active:
+            return
+        self._apply_zoom(event.x, event.y)
+
 
     def _on_preview_canvas_resize(self, e):
         self.preview_canvas.coords('hint', e.width//2, e.height//2)
@@ -728,11 +993,8 @@ class PhotoPicker(tk.Tk):
 
         if selected:
             fill, outline, lw, tick_col = SELECT_COLOR, 'white', 2, 'white'
-        else:
-            fill, outline, lw, tick_col = DIM_COLOR, '#555', 1, '#444'
-
-        c.create_oval(cx-r, cy-r, cx+r, cy+r, fill=fill, outline=outline, width=lw, tags='circles')
-        c.create_text(cx, cy+1, text='✓', font=('Arial', 9, 'bold'), fill=tick_col, tags='circles')
+            c.create_oval(cx-r, cy-r, cx+r, cy+r, fill=fill, outline=outline, width=lw, tags='circles')
+            c.create_text(cx, cy+1, text='✓', font=('Arial', 9, 'bold'), fill=tick_col, tags='circles')
 
         self._preview_hitbox = (cx-r, cy-r, cx+r, cy+r)
         c.tag_bind('circles', '<Button-1>', self._preview_circle_click)
@@ -802,6 +1064,7 @@ class PhotoPicker(tk.Tk):
         # local vars
         v_wheel   = tk.BooleanVar(value=self.wheel_nav.get())
         v_preview = tk.BooleanVar(value=self.preview_only.get())
+        v_zoom    = tk.IntVar(value=self.zoom_factor)
 
         tk.Label(dlg, text='Mouse wheel behaviour',
                  font=('Consolas', 10, 'bold'), bg='#1a1a2e', fg='#7ecfff'
@@ -832,20 +1095,40 @@ class PhotoPicker(tk.Tk):
                        selectcolor='#0f3460', activebackground='#1a1a2e'
                        ).grid(row=5, column=0, columnspan=2, sticky='w', **pad)
 
+        ttk.Separator(dlg, orient='horizontal').grid(
+            row=6, column=0, columnspan=2, sticky='ew', padx=16, pady=6)
+
+        tk.Label(dlg, text='Right-click zoom',
+                 font=('Consolas', 10, 'bold'), bg='#1a1a2e', fg='#7ecfff'
+                 ).grid(row=7, column=0, columnspan=2, sticky='w', padx=16, pady=(2, 2))
+
+        zoom_row = tk.Frame(dlg, bg='#1a1a2e')
+        zoom_row.grid(row=8, column=0, columnspan=2, sticky='w', padx=16, pady=6)
+        tk.Label(zoom_row, text='Zoom level:', font=fn, bg='#1a1a2e', fg='#ccc').pack(side='left')
+        zoom_spin = tk.Spinbox(zoom_row, from_=110, to=800, increment=10,
+                               textvariable=v_zoom, width=5, font=fn,
+                               bg='#222', fg='#ddd', buttonbackground='#444',
+                               relief='flat', justify='center')
+        zoom_spin.pack(side='left', padx=(8, 4))
+        tk.Label(zoom_row, text='%', font=fn, bg='#1a1a2e', fg='#ccc').pack(side='left')
+
         def on_ok():
             self.wheel_nav.set(v_wheel.get())
             prev_only = self.preview_only.get()
             self.preview_only.set(v_preview.get())
+            zoom_val = max(110, min(800, v_zoom.get()))
+            self.zoom_factor = zoom_val
             self._save_settings(
                 wheel_nav=v_wheel.get(),
-                preview_only=v_preview.get()
+                preview_only=v_preview.get(),
+                zoom_factor=zoom_val
             )
             if v_preview.get() != prev_only:
                 self._apply_preview_only()
             dlg.destroy()
 
         btn_frame = tk.Frame(dlg, bg='#1a1a2e')
-        btn_frame.grid(row=6, column=0, columnspan=2, pady=(0, 12))
+        btn_frame.grid(row=9, column=0, columnspan=2, pady=(0, 12))
         tk.Button(btn_frame, text='OK', command=on_ok,
                   font=('Consolas', 10, 'bold'), bg='#1a6b4a', fg='white',
                   relief='flat', padx=20, pady=4).pack(side='left', padx=8)
