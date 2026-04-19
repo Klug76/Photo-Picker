@@ -153,6 +153,8 @@ class PhotoPicker(tk.Tk):
         self._last_mouse_x = 0
         self._last_mouse_y = 0
         self.zoom_factor = int(self._settings.get('zoom_factor', 200))  # percent, e.g. 200 = 2x
+        self.show_histogram = tk.BooleanVar(value=self._settings.get('show_histogram', True))
+        self._histogram_data = None  # list of (r_vals, g_vals, b_vals) length-256 tuples
 
         self.thumb_cells = {}
         self._focused_idx = 0
@@ -192,7 +194,13 @@ class PhotoPicker(tk.Tk):
 
         tk.Button(top, text='⚙', command=self._open_settings,
                   font=fn_btn, bg='#2a3a5e', fg='white',
-                  relief='flat', padx=8, pady=4).pack(side='left', padx=(6, 12))
+                  relief='flat', padx=8, pady=4).pack(side='left', padx=(6, 4))
+
+        self._hist_btn = tk.Button(top, text='▦', command=self._toggle_histogram,
+                  font=fn_btn, bg='#2a3a5e', fg='white',
+                  relief='flat', padx=8, pady=4)
+        self._hist_btn.pack(side='left', padx=(0, 12))
+        self._update_hist_btn()
 
         tk.Label(top, text='Sort:', font=fn_label, bg='#16213e', fg='#aaa').pack(side='left', padx=(20, 2))
         self._date_cb = ttk.Combobox(top, textvariable=self.date_sort, values=DATE_OPTIONS, state='readonly', width=18, font=fn_label)
@@ -860,18 +868,20 @@ class PhotoPicker(tk.Tk):
     def _load_preview_bg(self, path):
         try:
             with Image.open(path) as src:
-                self._preview_zoom_img = src.copy()          # оригинал для зума
-                # обычное превью
+                self._preview_zoom_img = src.copy()  # full-res copy for zoom
                 pw = max(self.left_panel.winfo_width() - 32, 200)
                 ph = max(self.preview_canvas.winfo_height() - 32, 200)
                 scale = min(pw / src.width, ph / src.height, 1.0)
-                resized = src.resize((int(src.width*scale), int(src.height*scale)), Image.LANCZOS)
+                resized = src.resize((int(src.width * scale), int(src.height * scale)), Image.LANCZOS)
+                hdata = self._compute_histogram(resized)
                 img = ImageTk.PhotoImage(resized)
         except Exception:
             img = None
+            hdata = None
             self._preview_zoom_img = None
 
         if path == self.current_preview:
+            self._histogram_data = hdata
             self.after(0, lambda: self._set_preview(img))
 
 
@@ -884,11 +894,95 @@ class PhotoPicker(tk.Tk):
         c.create_image(cw//2, ch//2, anchor='center', image=img, tags='photo')
 
         self._draw_preview_circles()
+        self._draw_histogram()
 
         c.bind('<ButtonPress-3>', self._start_zoom)
         c.bind('<ButtonRelease-3>', self._end_zoom)
         c.bind('<B3-Motion>', self._on_zoom_motion)
 
+
+
+    # ── Histogram ─────────────────────────────────────────────────────────────
+
+    def _compute_histogram(self, pil_img):
+        """Return (r[256], g[256], b[256]) raw counts from a PIL image."""
+        rgb = pil_img.convert('RGB')
+        raw = rgb.histogram()   # 768 values: R*256 + G*256 + B*256
+        r = raw[0:256]
+        g = raw[256:512]
+        b = raw[512:768]
+        return (r, g, b)
+
+    def _toggle_histogram(self):
+        self.show_histogram.set(not self.show_histogram.get())
+        self._update_hist_btn()
+        self._save_settings(show_histogram=self.show_histogram.get())
+        if self.current_preview:
+            self._draw_histogram()
+
+    def _update_hist_btn(self):
+        active = self.show_histogram.get()
+        self._hist_btn.config(bg='#1a6b4a' if active else '#2a3a5e')
+
+    def _draw_histogram(self):
+        """Draw RGB histogram overlay in the bottom-left corner of the preview canvas."""
+        c = self.preview_canvas
+        c.delete('histogram')
+
+        if not self.show_histogram.get() or not self._histogram_data:
+            return
+
+        PAD   = 10   # margin from canvas edge
+        W, H  = 200, 80
+        cw = c.winfo_width()
+        ch = c.winfo_height()
+        if cw < 10 or ch < 10:
+            return
+
+        x0 = PAD
+        y0 = ch - PAD - H
+        x1 = x0 + W
+        y1 = y0 + H
+
+        # Semi-transparent background (stipple trick — no true alpha in tkinter Canvas)
+        c.create_rectangle(x0, y0, x1, y1,
+                           fill='#0d0d1a', outline='#334', width=1,
+                           stipple='gray50', tags='histogram')
+        # Solid inner backdrop at reduced opacity feel
+        c.create_rectangle(x0 + 1, y0 + 1, x1 - 1, y1 - 1,
+                           fill='#0d0d1a', outline='',
+                           tags='histogram')
+
+        r_vals, g_vals, b_vals = self._histogram_data
+
+        # Skip pure-black bucket (index 0) to avoid it dominating the scale
+        peak = max(
+            max(r_vals[1:]), max(g_vals[1:]), max(b_vals[1:]), 1
+        )
+
+        INNER_X = x0 + 4
+        INNER_W = W - 8
+        INNER_Y = y0 + 4
+        INNER_H = H - 8
+
+        for channel, color in ((r_vals, '#e05555'), (g_vals, '#55e055'), (b_vals, '#5588e0')):
+            pts = []
+            for i, val in enumerate(channel):
+                cx = INNER_X + int(i / 255 * (INNER_W - 1))
+                bar_h = int(val / peak * INNER_H)
+                cy = INNER_Y + INNER_H - bar_h
+                pts.append((cx, cy))
+
+            # Draw as polyline (fast, one canvas item per channel)
+            if len(pts) >= 2:
+                flat = [coord for pt in pts for coord in pt]
+                c.create_line(*flat, fill=color, width=1,
+                              tags='histogram')
+
+        # Thin border on top
+        c.create_rectangle(x0, y0, x1, y1,
+                           fill='', outline='#446', width=1,
+                           tags='histogram')
 
     def _cursor_to_orig(self, mouse_x, mouse_y):
         """Convert canvas mouse coordinates to original image pixel coordinates."""
@@ -1121,7 +1215,8 @@ class PhotoPicker(tk.Tk):
             self._save_settings(
                 wheel_nav=v_wheel.get(),
                 preview_only=v_preview.get(),
-                zoom_factor=zoom_val
+                zoom_factor=zoom_val,
+                show_histogram=self.show_histogram.get()
             )
             if v_preview.get() != prev_only:
                 self._apply_preview_only()
