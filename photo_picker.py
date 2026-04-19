@@ -20,6 +20,7 @@ from pathlib import Path
 THUMB_W, THUMB_H = 160, 120
 PREVIEW_MAX = 900
 EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+RAW_EXTS = {'.arw', '.cr2', '.cr3', '.nef', '.dng', '.orf', '.rw2', '.raf'}
 CHECK_SIZE = 18
 CHECK_PAD  = 4
 SEL_BORDER = 3
@@ -48,11 +49,12 @@ def load_thumb(path, w=THUMB_W, h=THUMB_H):
 
 
 class ThumbCell(tk.Frame):
-    def __init__(self, master, path, thumb, on_preview, on_toggle, **kw):
+    def __init__(self, master, path, thumb, on_preview, on_toggle, on_hover=None, **kw):
         super().__init__(master, bg='#1a1a2e', **kw)
         self.path = path
         self.on_preview = on_preview
         self.on_toggle = on_toggle
+        self.on_hover = on_hover or (lambda p: None)
         self._is_focused = False
         self._selected = False
         self._thumb_image = None
@@ -83,6 +85,10 @@ class ThumbCell(tk.Frame):
 
         self.canvas.bind('<Button-1>', self._on_click)
         self.name_lbl.bind('<Button-1>', lambda e: self.on_preview(self.path))
+        self.canvas.bind('<Enter>', lambda e: self.on_hover(self.path))
+        self.canvas.bind('<Leave>', lambda e: self.on_hover(None))
+        self.name_lbl.bind('<Enter>', lambda e: self.on_hover(self.path))
+        self.name_lbl.bind('<Leave>', lambda e: self.on_hover(None))
 
         self._redraw()
 
@@ -155,6 +161,8 @@ class PhotoPicker(tk.Tk):
         self.zoom_factor = int(self._settings.get('zoom_factor', 200))  # percent, e.g. 200 = 2x
         self.show_histogram = tk.BooleanVar(value=self._settings.get('show_histogram', True))
         self._histogram_data = None  # list of (r_vals, g_vals, b_vals) length-256 tuples
+        self._thumb_histo_after_id = None  # pending hover histogram update
+        self._histogram_cache = {}  # path -> (r[256], g[256], b[256])
 
         self.thumb_cells = {}
         self._focused_idx = 0
@@ -285,6 +293,13 @@ class PhotoPicker(tk.Tk):
         self.grid_frame = tk.Frame(self.canvas, bg='#1a1a2e')
         self.canvas_window = self.canvas.create_window((0, 0), window=self.grid_frame, anchor='nw')
 
+        # Fixed histogram panel at the bottom of the right panel
+        self._thumb_hist_canvas = tk.Canvas(self._right, bg='#0d0d1a',
+                                            width=200, height=80,
+                                            highlightthickness=1,
+                                            highlightbackground='#334')
+        self._thumb_hist_canvas.pack(side='bottom', anchor='center', pady=(0, 6))
+
         self.grid_frame.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         self.canvas.bind('<Configure>', self._on_grid_canvas_resize)
 
@@ -313,6 +328,7 @@ class PhotoPicker(tk.Tk):
 
         # Complete state reset
         self.thumbs.clear()
+        self._histogram_cache.clear()
         self.current_selection.clear()
         self.current_group = None          # ← Important fix
 
@@ -520,6 +536,20 @@ class PhotoPicker(tk.Tk):
         else:
             self._create_and_copy()
 
+    def _find_raw_sidecar(self, jpeg_path):
+        """Return a list of RAW files in the same folder with the same stem."""
+        stem = jpeg_path.stem
+        folder = jpeg_path.parent
+        return [
+            folder / (stem + ext)
+            for ext in RAW_EXTS
+            if (folder / (stem + ext)).exists()
+        ] + [
+            folder / (stem + ext.upper())
+            for ext in RAW_EXTS
+            if (folder / (stem + ext.upper())).exists()
+        ]
+
     def _create_and_copy(self):
         proposed = self.group_name_var.get().strip() or "group1"
         actual_name = self._get_next_available_name(proposed)
@@ -536,6 +566,13 @@ class PhotoPicker(tk.Tk):
                     copied += 1
                 except Exception as ex:
                     errors.append(f'{path.name}: {ex}')
+            for raw in self._find_raw_sidecar(path):
+                raw_dest = dest_dir / raw.name
+                if not raw_dest.exists():
+                    try:
+                        shutil.copy2(raw, raw_dest)
+                    except Exception as ex:
+                        errors.append(f'{raw.name}: {ex}')
 
         summary = f'Created group "{actual_name}" and copied {copied} photo(s).'
         if errors:
@@ -565,6 +602,13 @@ class PhotoPicker(tk.Tk):
                     added += 1
                 except Exception as ex:
                     errors.append(str(ex))
+            for raw in self._find_raw_sidecar(path):
+                raw_dest = dest_dir / raw.name
+                if not raw_dest.exists():
+                    try:
+                        shutil.copy2(raw, raw_dest)
+                    except Exception as ex:
+                        errors.append(f'{raw.name}: {ex}')
 
         for f in list(dest_dir.iterdir()):
             if f.is_file() and f.suffix.lower() in EXTS:
@@ -575,6 +619,14 @@ class PhotoPicker(tk.Tk):
                         removed += 1
                     except Exception as ex:
                         errors.append(str(ex))
+                    # Also remove the RAW sidecar if it exists in the group folder
+                    for raw in self._find_raw_sidecar(path):
+                        raw_in_dest = dest_dir / raw.name
+                        if raw_in_dest.exists():
+                            try:
+                                raw_in_dest.unlink()
+                            except Exception as ex:
+                                errors.append(f'{raw_in_dest.name}: {ex}')
 
         summary = f'Synchronized "{group_name}": added {added}, removed {removed}'
         if errors:
@@ -634,7 +686,8 @@ class PhotoPicker(tk.Tk):
         cols = self._get_cols()
         for idx, path in enumerate(self.images):
             th = self.thumbs.get(path)
-            cell = ThumbCell(self.grid_frame, path, th, self._show_preview, self._on_toggle)
+            cell = ThumbCell(self.grid_frame, path, th, self._show_preview, self._on_toggle,
+                            on_hover=self._on_thumb_hover)
             row, col = divmod(idx, cols)
             cell.grid(row=row, column=col, padx=3, pady=3)
             self.thumb_cells[path] = cell
@@ -873,7 +926,9 @@ class PhotoPicker(tk.Tk):
                 ph = max(self.preview_canvas.winfo_height() - 32, 200)
                 scale = min(pw / src.width, ph / src.height, 1.0)
                 resized = src.resize((int(src.width * scale), int(src.height * scale)), Image.LANCZOS)
-                hdata = self._compute_histogram(resized)
+                if path not in self._histogram_cache:
+                    self._histogram_cache[path] = self._compute_histogram(resized)
+                hdata = self._histogram_cache[path]
                 img = ImageTk.PhotoImage(resized)
         except Exception:
             img = None
@@ -896,9 +951,9 @@ class PhotoPicker(tk.Tk):
         self._draw_preview_circles()
         self._draw_histogram()
 
-        c.bind('<ButtonPress-3>', self._start_zoom)
-        c.bind('<ButtonRelease-3>', self._end_zoom)
-        c.bind('<B3-Motion>', self._on_zoom_motion)
+        c.bind('<ButtonPress-1>', self._start_zoom)
+        c.bind('<ButtonRelease-1>', self._end_zoom)
+        c.bind('<B1-Motion>', self._on_zoom_motion)
 
 
 
@@ -983,6 +1038,76 @@ class PhotoPicker(tk.Tk):
         c.create_rectangle(x0, y0, x1, y1,
                            fill='', outline='#446', width=1,
                            tags='histogram')
+
+    # ── Thumbnail hover histogram ──────────────────────────────────────────────
+
+    def _on_thumb_hover(self, path):
+        """Called when mouse enters/leaves a thumbnail cell. path=None on leave."""
+        if self._thumb_histo_after_id:
+            self.after_cancel(self._thumb_histo_after_id)
+            self._thumb_histo_after_id = None
+
+        if path is None:
+            self._draw_thumb_histogram(None)
+            return
+
+        # Use cached histogram immediately if available (same data as large preview)
+        if path in self._histogram_cache:
+            self._draw_thumb_histogram(self._histogram_cache[path])
+            return
+
+        # Not yet cached — load in background with small delay to avoid thrashing
+        self._thumb_histo_after_id = self.after(80, lambda: self._load_thumb_histogram(path))
+
+    def _load_thumb_histogram(self, path):
+        """Load thumbnail histogram in background thread and cache the result."""
+        self._thumb_histo_after_id = None
+        def _work():
+            try:
+                with Image.open(path) as im:
+                    small = im.copy()
+                    small.thumbnail((160, 120), Image.BILINEAR)
+                    hdata = self._compute_histogram(small)
+                    self._histogram_cache[path] = hdata
+            except Exception:
+                hdata = None
+            self.after(0, lambda: self._draw_thumb_histogram(hdata))
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _draw_thumb_histogram(self, hdata):
+        """Render RGB histogram into the fixed panel below the thumbnail grid."""
+        c = self._thumb_hist_canvas
+        c.delete('all')
+        if not hdata:
+            return
+
+        W = c.winfo_width() or 200
+        H = c.winfo_height() or 80
+
+        # Background
+        c.create_rectangle(0, 0, W, H, fill='#0d0d1a', outline='')
+
+        r_vals, g_vals, b_vals = hdata
+        peak = max(max(r_vals[1:]), max(g_vals[1:]), max(b_vals[1:]), 1)
+
+        PAD_X, PAD_Y = 4, 4
+        IW = W - PAD_X * 2
+        IH = H - PAD_Y * 2
+
+        for channel, color in ((r_vals, '#e05555'), (g_vals, '#55e055'), (b_vals, '#5588e0')):
+            pts = []
+            for i, val in enumerate(channel):
+                cx = PAD_X + int(i / 255 * (IW - 1))
+                bar_h = int(val / peak * IH)
+                cy = PAD_Y + IH - bar_h
+                pts.append((cx, cy))
+            if len(pts) >= 2:
+                flat = [coord for pt in pts for coord in pt]
+                c.create_line(*flat, fill=color, width=1)
+
+        # Border
+        c.create_rectangle(0, 0, W - 1, H - 1, fill='', outline='#446', width=1)
 
     def _cursor_to_orig(self, mouse_x, mouse_y):
         """Convert canvas mouse coordinates to original image pixel coordinates."""
