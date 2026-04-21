@@ -57,6 +57,7 @@ class ThumbCell(tk.Frame):
         self.on_hover = on_hover or (lambda p: None)
         self._is_focused = False
         self._selected = False
+        self._in_group = False
         self._thumb_image = None
 
         name = path.name
@@ -100,6 +101,10 @@ class ThumbCell(tk.Frame):
         self._selected = selected
         self._redraw()
 
+    def set_in_group(self, in_group: bool):
+        self._in_group = in_group
+        self._redraw()
+
     def _on_click(self, event):
         x, y = event.x, event.y
         x1, y1, x2, y2 = self._hit_box
@@ -120,12 +125,22 @@ class ThumbCell(tk.Frame):
 
     def _redraw(self):
         if self._selected:
-            fill, outline, width, tick = SELECT_COLOR, 'white', 2, 'white'
-            self.canvas.itemconfig(self._circle_id, state='normal', fill=fill, outline=outline, width=width)
-            self.canvas.itemconfig(self._check_id, state='normal', fill=tick)
+            self.canvas.itemconfig(self._circle_id, state='normal',
+                                   fill=SELECT_COLOR, outline='white', width=2)
+            self.canvas.itemconfig(self._check_id, state='normal',
+                                   text='✓', font=('Arial', 9, 'bold'), fill='white')
+        elif self._in_group:
+            # Dim ring + blue dot — photo already belongs to a group
+            self.canvas.itemconfig(self._circle_id, state='normal',
+                                   fill=DIM_COLOR, outline='#7ecfff', width=1)
+            self.canvas.itemconfig(self._check_id, state='normal',
+                                   text='•', font=('Arial', 11, 'bold'), fill='#7ecfff')
         else:
-            self.canvas.itemconfig(self._circle_id, state='hidden')
-            self.canvas.itemconfig(self._check_id, state='hidden')
+            # Always-visible dim ring, no fill, no inner mark
+            self.canvas.itemconfig(self._circle_id, state='normal',
+                                   fill='', outline='#666', width=1)
+            self.canvas.itemconfig(self._check_id, state='hidden',
+                                   text='✓', font=('Arial', 9, 'bold'))
 
 
 class PhotoPicker(tk.Tk):
@@ -141,6 +156,7 @@ class PhotoPicker(tk.Tk):
         self.current_selection = set()
         self.current_group = None
         self.groups = []
+        self._grouped_paths = set()  # paths that exist in any group subfolder
 
         self._settings = self._load_settings()
         self.date_sort = tk.StringVar(value=self._settings.get('date_sort', DATE_OPTIONS[0]))
@@ -464,6 +480,22 @@ class PhotoPicker(tk.Tk):
         groups.sort()
         self.groups = groups
         self.group_cb['values'] = ['(no group)'] + groups
+        self._refresh_grouped_paths()
+
+    def _refresh_grouped_paths(self):
+        """Rebuild the set of source-folder paths that appear in any group subfolder."""
+        self._grouped_paths = set()
+        if not self.folder:
+            return
+        for group in self.groups:
+            dest_dir = self.folder / group
+            if not dest_dir.is_dir():
+                continue
+            for f in dest_dir.iterdir():
+                if f.is_file() and f.suffix.lower() in EXTS:
+                    main_p = self.folder / f.name
+                    if main_p.exists():
+                        self._grouped_paths.add(main_p)
 
     def _get_next_group_name(self):
         return self._get_next_available_name("group1")
@@ -506,6 +538,7 @@ class PhotoPicker(tk.Tk):
     def _update_all_cells(self):
         for path, cell in self.thumb_cells.items():
             cell.set_selected(path in self.current_selection)
+            cell.set_in_group(path in self._grouped_paths)
 
     def _on_toggle(self, path):
         if path in self.current_selection:
@@ -583,7 +616,7 @@ class PhotoPicker(tk.Tk):
         self.current_group = None
         self.group_cb.set('(no group)')
         self._update_all_cells()
-        self._refresh_groups_list()
+        self._refresh_groups_list()  # also refreshes _grouped_paths
         self.group_name_var.set(self._get_next_group_name())
         self._update_ui_state()
 
@@ -634,6 +667,7 @@ class PhotoPicker(tk.Tk):
         messagebox.showinfo('Done', summary)
 
         self._load_group_selection(group_name)
+        self._refresh_grouped_paths()
         self._update_all_cells()
         self._draw_preview_circles()
         self._update_ui_state()
@@ -692,6 +726,7 @@ class PhotoPicker(tk.Tk):
             cell.grid(row=row, column=col, padx=3, pady=3)
             self.thumb_cells[path] = cell
             cell.set_selected(path in self.current_selection)
+            cell.set_in_group(path in self._grouped_paths)
 
         # Grid is fully ready, scroll works immediately!
         self._thumb_stop = False
@@ -1204,6 +1239,7 @@ class PhotoPicker(tk.Tk):
         if not self.preview_only.get() or not self.current_preview:
             return
         selected = self.current_preview in self.current_selection
+        in_group = self.current_preview in self._grouped_paths
         r = CHECK_SIZE // 2
         pad = CHECK_PAD + 8
         cw = c.winfo_width()
@@ -1211,9 +1247,14 @@ class PhotoPicker(tk.Tk):
         cy = pad + r
 
         if selected:
-            fill, outline, lw, tick_col = SELECT_COLOR, 'white', 2, 'white'
+            fill, outline, lw = SELECT_COLOR, 'white', 2
             c.create_oval(cx-r, cy-r, cx+r, cy+r, fill=fill, outline=outline, width=lw, tags='circles')
-            c.create_text(cx, cy+1, text='✓', font=('Arial', 9, 'bold'), fill=tick_col, tags='circles')
+            c.create_text(cx, cy+1, text='✓', font=('Arial', 9, 'bold'), fill='white', tags='circles')
+        elif in_group:
+            c.create_oval(cx-r, cy-r, cx+r, cy+r, fill=DIM_COLOR, outline='#7ecfff', width=1, tags='circles')
+            c.create_text(cx, cy+1, text='•', font=('Arial', 11, 'bold'), fill='#7ecfff', tags='circles')
+        else:
+            c.create_oval(cx-r, cy-r, cx+r, cy+r, fill='', outline='#666', width=1, tags='circles')
 
         self._preview_hitbox = (cx-r, cy-r, cx+r, cy+r)
         c.tag_bind('circles', '<Button-1>', self._preview_circle_click)

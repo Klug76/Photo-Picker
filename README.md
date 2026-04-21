@@ -8,7 +8,9 @@ A fast, keyboard-friendly photo sorter for Windows. Browse a folder, assign phot
 
 - **Thumbnail grid** with lazy background loading — cells appear instantly, images load in priority order as you scroll
 - **Large preview** panel with resizable splitter
-- **Right-click zoom** — hold RMB on the preview to magnify the area under the cursor; move the mouse to inspect any part of the photo at pixel-perfect quality (no smoothing). Zoom level is configurable.
+- **Left-click zoom** — hold LMB on the preview to magnify the area under the cursor; move the mouse to inspect any part of the photo at pixel-perfect quality (no smoothing). Zoom level is configurable.
+- **RGB histogram** — an overlay in the bottom-left corner of the preview shows the red, green, and blue channel distribution of the current photo. Toggle it with the **▦** button in the toolbar. Hovering a thumbnail shows that photo's histogram immediately.
+- **Group membership dot** — thumbnails that already belong to any group show a small blue dot in the selection corner, so you can see at a glance which photos have been filed away.
 - **Group management** — groups are real subfolders inside the source folder. The group dropdown reflects the actual folders on disk. Selecting an existing group loads its current contents as the selection.
 - **Smart copy button** — changes label and colour depending on context: create a new group, add photos to an existing one, or synchronize (adds missing files, removes deselected ones)
 - **Keyboard navigation** — `←` `→` arrows, `Space` to toggle selection
@@ -63,11 +65,11 @@ python photo_picker.py C:\Photos\Vacation
   - **Add** — copies newly selected photos into the folder, leaves existing ones untouched.
   - **Synchronize** — copies new selections in and removes deselected photos from the folder, bringing it exactly in line with the current selection.
 
-### Right-click zoom
+### Left-click zoom
 
-Hold the **right mouse button** on the preview image to activate zoom. The view magnifies the area directly under the cursor — move the mouse to pan around the full image. Release RMB to return to the normal preview.
+Hold the **left mouse button** on the preview image to activate zoom. The view magnifies the area directly under the cursor — move the mouse to pan around the full image. Release LMB to return to the normal preview.
 
-Zoom level (default 200%) is set in **Settings → Right-click zoom**.
+Zoom level (default 200%) is set in **Settings → Left-click zoom**.
 
 ### Keyboard shortcuts
 
@@ -94,7 +96,7 @@ Two dropdowns next to the **Sort:** label work together:
 |--------|-------------|
 | Mouse wheel | Scroll the thumbnail grid **or** navigate photos (prev / next) |
 | Preview only | Hide the thumbnail grid; selection circle appears on the preview |
-| Right-click zoom level | Magnification factor when holding RMB (110%–800%, default 200%) |
+| Left-click zoom level | Magnification factor when holding LMB (110%–800%, default 200%) |
 
 Settings are saved to `%LOCALAPPDATA%\PhotoPicker\settings.json` and restored on next launch.
 
@@ -113,7 +115,8 @@ Settings are saved to `%LOCALAPPDATA%\PhotoPicker\settings.json` and restored on
   "splitter_ratio": 0.42,
   "wheel_nav": false,
   "preview_only": false,
-  "zoom_factor": 200
+  "zoom_factor": 200,
+  "show_histogram": true
 }
 ```
 
