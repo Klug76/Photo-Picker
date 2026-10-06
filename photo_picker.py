@@ -28,6 +28,7 @@ SEL_COLOR  = '#7ecfff'
 
 SELECT_COLOR = '#2ecc71'
 DIM_COLOR    = '#165528'
+COMPARE_COLOR = '#f39c12'
 
 BTN_DEFAULT_BG = '#555'
 BTN_CLEAR_BG   = '#f39c12'
@@ -49,12 +50,13 @@ def load_thumb(path, w=THUMB_W, h=THUMB_H):
 
 
 class ThumbCell(tk.Frame):
-    def __init__(self, master, path, thumb, on_preview, on_toggle, on_hover=None, **kw):
+    def __init__(self, master, path, thumb, on_preview, on_toggle, on_hover=None, on_peek=None, **kw):
         super().__init__(master, bg='#1a1a2e', **kw)
         self.path = path
         self.on_preview = on_preview
         self.on_toggle = on_toggle
         self.on_hover = on_hover or (lambda p: None)
+        self.on_peek = on_peek or (lambda p: None)
         self._is_focused = False
         self._selected = False
         self._in_group = False
@@ -85,6 +87,8 @@ class ThumbCell(tk.Frame):
         self._hit_box = (self._cx-r, self._cy-r, self._cx+r, self._cy+r)
 
         self.canvas.bind('<Button-1>', self._on_click)
+        self.canvas.bind('<Button-3>', lambda e: self.on_peek(self.path))
+        self.canvas.bind('<ButtonRelease-3>', lambda e: self.on_peek(None))
         self.name_lbl.bind('<Button-1>', lambda e: self.on_preview(self.path))
         self.canvas.bind('<Enter>', lambda e: self.on_hover(self.path))
         self.canvas.bind('<Leave>', lambda e: self.on_hover(None))
@@ -166,6 +170,7 @@ class PhotoPicker(tk.Tk):
         self.group_name_var = tk.StringVar()
 
         self.current_preview = None
+        self._peek_path = None  # photo shown on compare peek (RMB held on a thumbnail)
 
         self._preview_zoom_active = False
         self._preview_zoom_img = None
@@ -241,8 +246,14 @@ class PhotoPicker(tk.Tk):
         self.group_cb.bind('<<ComboboxSelected>>', self._on_group_selected)
 
         tk.Label(top, text='New group name:', font=fn_label, bg='#16213e', fg='#aaa').pack(side='left', padx=(12, 2))
-        self.new_group_entry = tk.Entry(top, textvariable=self.group_name_var, width=16, font=fn_label, bg='#222', fg='#ddd')
+        self.new_group_entry = tk.Entry(top, textvariable=self.group_name_var, width=16, font=fn_label,
+                                        bg='#222', fg='#ddd', disabledbackground='#1a1a2e',
+                                        insertbackground='#ddd',
+                                        highlightthickness=1, highlightbackground='#333',
+                                        highlightcolor=SEL_COLOR)
         self.new_group_entry.pack(side='left', padx=(0, 12))
+        self.new_group_entry.bind('<Return>', self._commit_group_name)
+        self.new_group_entry.bind('<Escape>', self._commit_group_name)
 
         self.selected_label = tk.Label(top, text='Selected: 0',
                                        font=('Consolas', 10, 'bold'), bg='#16213e', fg='#7ecfff')
@@ -347,6 +358,7 @@ class PhotoPicker(tk.Tk):
         self._histogram_cache.clear()
         self.current_selection.clear()
         self.current_group = None          # ← Important fix
+        self.new_group_entry.config(state='normal')
 
         self.title(f"Photo Picker — {self.folder}")
 
@@ -511,9 +523,22 @@ class PhotoPicker(tk.Tk):
             num += 1
         return f"{prefix}{num}"
 
+    def _validate_group_name(self, name: str) -> bool:
+        bad = sorted(set(re.findall(r'[\\/:*?"<>|]', name)))
+        if bad:
+            messagebox.showwarning('Invalid group name',
+                                   'Symbols not allowed in folder name: ' + '  '.join(bad))
+            return False
+        if name.endswith('.'):
+            messagebox.showwarning('Invalid group name', 'Name must not end with a dot.')
+            return False
+        return True
+
     def _on_group_selected(self, event=None):
+        self.focus_set()  # combobox keeps keyboard focus after selection and swallows keys
         val = self.group_cb.get()
         self.current_group = None if val == '(no group)' or not val else val
+        self.new_group_entry.config(state='disabled' if self.current_group else 'normal')
 
         if self.current_group:
             self._load_group_selection(self.current_group)
@@ -541,6 +566,7 @@ class PhotoPicker(tk.Tk):
             cell.set_in_group(path in self._grouped_paths)
 
     def _on_toggle(self, path):
+        self.focus_set()
         if path in self.current_selection:
             self.current_selection.discard(path)
         else:
@@ -552,8 +578,10 @@ class PhotoPicker(tk.Tk):
         self._update_ui_state()
 
     def _clear_current_selection(self):
+        self.focus_set()
         self.current_selection.clear()
         self.current_group = None
+        self.new_group_entry.config(state='normal')
         self.group_cb.set('(no group)')
         self.group_name_var.set(self._get_next_group_name())
 
@@ -562,6 +590,7 @@ class PhotoPicker(tk.Tk):
         self._update_ui_state()
 
     def _apply_groups(self):
+        self.focus_set()
         if not self.current_selection:
             return
         if self.current_group:
@@ -585,6 +614,8 @@ class PhotoPicker(tk.Tk):
 
     def _create_and_copy(self):
         proposed = self.group_name_var.get().strip() or "group1"
+        if not self._validate_group_name(proposed):
+            return
         actual_name = self._get_next_available_name(proposed)
         dest_dir = self.folder / actual_name
         dest_dir.mkdir(exist_ok=True)
@@ -614,6 +645,7 @@ class PhotoPicker(tk.Tk):
 
         self.current_selection.clear()
         self.current_group = None
+        self.new_group_entry.config(state='normal')
         self.group_cb.set('(no group)')
         self._update_all_cells()
         self._refresh_groups_list()  # also refreshes _grouped_paths
@@ -653,7 +685,7 @@ class PhotoPicker(tk.Tk):
                     except Exception as ex:
                         errors.append(str(ex))
                     # Also remove the RAW sidecar if it exists in the group folder
-                    for raw in self._find_raw_sidecar(path):
+                    for raw in self._find_raw_sidecar(f):
                         raw_in_dest = dest_dir / raw.name
                         if raw_in_dest.exists():
                             try:
@@ -695,6 +727,7 @@ class PhotoPicker(tk.Tk):
             return sorted(images, key=lambda p: 0 if orientations[p] == 'v' else 1)
 
     def _on_sort_changed(self, event=None):
+        self.focus_set()  # combobox keeps keyboard focus after selection and swallows keys
         self._save_settings()
         if self.folder:
             raw = [p for p in self.folder.iterdir() if p.suffix.lower() in EXTS and p.is_file()]
@@ -708,6 +741,7 @@ class PhotoPicker(tk.Tk):
     def _refresh_grid(self):
         # Stop existing worker threads
         self._thumb_stop = True
+        self._peek_path = None  # a held right-click peek dies with its cell
         while not self._thumb_queue.empty():
             try: self._thumb_queue.get(block=False)
             except: pass
@@ -721,7 +755,7 @@ class PhotoPicker(tk.Tk):
         for idx, path in enumerate(self.images):
             th = self.thumbs.get(path)
             cell = ThumbCell(self.grid_frame, path, th, self._show_preview, self._on_toggle,
-                            on_hover=self._on_thumb_hover)
+                            on_hover=self._on_thumb_hover, on_peek=self._on_peek)
             row, col = divmod(idx, cols)
             cell.grid(row=row, column=col, padx=3, pady=3)
             self.thumb_cells[path] = cell
@@ -876,28 +910,59 @@ class PhotoPicker(tk.Tk):
         self._spinner_after_id = self.after(80, self._spinner_tick)
 
     def _show_preview(self, path):
+        self.focus_set()  # interacting with a photo returns keyboard focus from text fields
         self.current_preview = path
-        self.lbl_fname.config(text=path.name)
         if path in self.images:
             self._focused_idx = self.images.index(path)
         self._update_focus_highlight()
+        if self._peek_path:
+            # compare peek owns the preview canvas; it is refreshed on release
+            return
+        self.lbl_fname.config(text=path.name)
         threading.Thread(target=self._load_preview_bg, args=(path,), daemon=True).start()
 
+    def _on_peek(self, path):
+        if path is None:
+            self._end_peek()
+            return
+        if path == self.current_preview:
+            return  # rclick on the current photo itself — nothing to compare
+        self._peek_path = path
+        self.lbl_fname.config(text=path.name + '  (compare)')
+        threading.Thread(target=self._load_preview_bg, args=(path, True), daemon=True).start()
+
+    def _end_peek(self):
+        if not self._peek_path:
+            return
+        self._peek_path = None
+        if self.current_preview:
+            self.lbl_fname.config(text=self.current_preview.name)
+            threading.Thread(target=self._load_preview_bg,
+                             args=(self.current_preview,), daemon=True).start()
+
+    def _in_text_editor(self, event):
+        return isinstance(event.widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Spinbox, tk.Text))
+
     def _on_key_left(self, event):
-        if not self.images: return
+        if self._in_text_editor(event) or not self.images: return
         self._focused_idx = (self._focused_idx - 1) % len(self.images)
         self._show_preview(self.images[self._focused_idx])
         self._scroll_to_focused()
 
     def _on_key_right(self, event):
-        if not self.images: return
+        if self._in_text_editor(event) or not self.images: return
         self._focused_idx = (self._focused_idx + 1) % len(self.images)
         self._show_preview(self.images[self._focused_idx])
         self._scroll_to_focused()
 
     def _on_key_space(self, event):
+        if self._in_text_editor(event): return
         if self.images:
             self._on_toggle(self.images[self._focused_idx])
+
+    def _commit_group_name(self, event=None):
+        self.group_name_var.set(self.group_name_var.get().strip())
+        self.focus_set()
 
     def _update_focus_highlight(self):
         for idx, path in enumerate(self.images):
@@ -953,7 +1018,7 @@ class PhotoPicker(tk.Tk):
         target = max(0, cy - ch * 2) / total_h
         self.canvas.yview_moveto(target)
 
-    def _load_preview_bg(self, path):
+    def _load_preview_bg(self, path, peek=False):
         try:
             with Image.open(path) as src:
                 self._preview_zoom_img = src.copy()  # full-res copy for zoom
@@ -970,7 +1035,11 @@ class PhotoPicker(tk.Tk):
             hdata = None
             self._preview_zoom_img = None
 
-        if path == self.current_preview:
+        if peek:
+            if self._peek_path == path:
+                self._histogram_data = hdata
+                self.after(0, lambda: self._set_preview(img))
+        elif path == self.current_preview:
             self._histogram_data = hdata
             self.after(0, lambda: self._set_preview(img))
 
@@ -985,6 +1054,9 @@ class PhotoPicker(tk.Tk):
 
         self._draw_preview_circles()
         self._draw_histogram()
+
+        if self._peek_path:
+            c.create_rectangle(2, 2, cw-3, ch-3, outline=COMPARE_COLOR, width=3, tags='peek')
 
         c.bind('<ButtonPress-1>', self._start_zoom)
         c.bind('<ButtonRelease-1>', self._end_zoom)
@@ -1160,6 +1232,7 @@ class PhotoPicker(tk.Tk):
         return x_orig, y_orig
 
     def _start_zoom(self, event):
+        self.focus_set()
         if not self._preview_zoom_img:
             return
         self._preview_zoom_active = True
@@ -1217,9 +1290,10 @@ class PhotoPicker(tk.Tk):
 
     def _end_zoom(self, event=None):
         self._preview_zoom_active = False
-        if self.current_preview:
+        path = self._peek_path or self.current_preview
+        if path:
             threading.Thread(target=self._load_preview_bg,
-                             args=(self.current_preview,), daemon=True).start()
+                             args=(path, bool(self._peek_path)), daemon=True).start()
 
 
     def _on_zoom_motion(self, event):
@@ -1238,8 +1312,9 @@ class PhotoPicker(tk.Tk):
         c.delete('circles')
         if not self.preview_only.get() or not self.current_preview:
             return
-        selected = self.current_preview in self.current_selection
-        in_group = self.current_preview in self._grouped_paths
+        target = self._peek_path or self.current_preview
+        selected = target in self.current_selection
+        in_group = target in self._grouped_paths
         r = CHECK_SIZE // 2
         pad = CHECK_PAD + 8
         cw = c.winfo_width()
@@ -1358,7 +1433,7 @@ class PhotoPicker(tk.Tk):
         ttk.Separator(dlg, orient='horizontal').grid(
             row=6, column=0, columnspan=2, sticky='ew', padx=16, pady=6)
 
-        tk.Label(dlg, text='Right-click zoom',
+        tk.Label(dlg, text='Left-click zoom',
                  font=('Consolas', 10, 'bold'), bg='#1a1a2e', fg='#7ecfff'
                  ).grid(row=7, column=0, columnspan=2, sticky='w', padx=16, pady=(2, 2))
 

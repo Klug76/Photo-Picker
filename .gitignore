@@ -14,6 +14,7 @@ env/
 
 # IDE
 .vscode/
+.zcode
 .idea/
 *.swp
 
@@ -25,9 +26,15 @@ desktop.ini
 # App data (settings are per-user, not per-repo)
 settings.json
 
+# User data
+photo_picker.txt
+
 # Photo output folders created by the app
 group1/
 group2/
 group3/
 group4/
 group5/
+
+# Agent
+memo.md
